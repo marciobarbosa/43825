@@ -230,16 +230,28 @@ sub main
     my $vldb = vos_listvldb($fs);
     my $tx = cell_vos_status($vldb->{servers});
     my $vols = cell_vos_listvol($vldb->{servers});
+    my $messages = {
+        "check_for_old_servers" => {}, # key == uuid
+        "check_for_missing_volumes" => {}, # key == volume id
+        "check_for_stray_volumes" => {}, # key == volume id
+        "check_for_broken_volume_names" => {}, # key == volume id
+        "check_for_stale_locks" => {}, # key == volume id
+        "check_for_failed_releases" => {}, # key == volume id
+        "check_for_missing_ro_clone_site" => {}, # key == volume id
+        "check_for_offline_volumes" => {}, # key == volume id
+    };
 
     $U2A = $vldb->{servers}->{u2a}; # for printing addresses instead of uuids
-    check_for_old_servers($vldb->{servers});
-    check_for_missing_volumes($vldb, $vols);
-    check_for_stray_volumes($vldb, $vols);
-    check_for_broken_volume_names($vldb, $vols);
-    check_for_missing_ro_clone_site($vldb);
-    check_for_stale_locks($vldb, $tx);
-    check_for_offline_volumes($vldb, $vols);
-    check_for_failed_releases($vldb);
+    check_for_old_servers($vldb->{servers}, $messages->{"check_for_old_servers"});
+    check_for_missing_volumes($vldb, $vols, $messages->{"check_for_missing_volumes"});
+    check_for_stray_volumes($vldb, $vols, $messages->{"check_for_stray_volumes"});
+    check_for_broken_volume_names($vldb, $vols, $messages->{"check_for_broken_volume_names"});
+    check_for_missing_ro_clone_site($vldb, $messages->{"check_for_missing_ro_clone_site"});
+    check_for_stale_locks($vldb, $tx, $messages->{"check_for_stale_locks"});
+    check_for_offline_volumes($vldb, $vols, $messages->{"check_for_offline_volumes"});
+    check_for_failed_releases($vldb, $messages->{"check_for_failed_releases"});
+
+    print_messages($vldb, $messages);
 
     return 0; # all checks ran
 }
@@ -265,12 +277,13 @@ sub is_dir_empty
 sub check_for_old_servers
 {
     my $servers = shift;
+    my $msg_hash = shift;
     my %active = map { $_ => 1 } @{ $servers->{active} };
 
     foreach my $uuid (keys(%{ $servers->{u2a} })) {
         unless ($active{$uuid}) {
             check_failed("old file server in vldb: $uuid (".
-                join(", ", @{ $servers->{u2a}->{$uuid} }) .")");
+                join(", ", @{ $servers->{u2a}->{$uuid} }) .")", $msg_hash, $uuid);
         }
     }
 }
@@ -285,13 +298,14 @@ sub check_for_missing_volumes
     info("checking for missing volumes ...");
     my $vldb = shift;
     my $vols = shift;
+    my $msg_hash = shift;
     my $sv = sites_hash($vols->{list},  "server");
     foreach my $site (@{ $vldb->{sites} }) {
         my $key = site_key($site);
         unless ($key && exists($sv->{$key})) {
             # Do not report sites which have not been released yet as missing.
             unless ($site->{type} eq "RO" && $site->{flag}) {
-                check_failed("missing volume: $site->{name} ($site->{id}) at ". location($site));
+                check_failed("missing volume: $site->{name} ($site->{id}) at ". location($site), $msg_hash, $site->{id});
                 $site->{missing} = 1;
             }
         }
@@ -325,6 +339,7 @@ sub check_for_stray_volumes
     info("checking for stray volumes ...");
     my $vldb = shift;
     my $vols = shift;
+    my $msg_hash = shift;
     my $db = sites_hash($vldb->{sites}, "vldb");
 
     # first pass: find unbroken vldb entries for stray vs rogue warnings.
@@ -357,7 +372,7 @@ sub check_for_stray_volumes
             else {
                 $warn = "orphan";
             }
-            check_failed("$warn volume: $vol at ". location($site) . $inuse);
+            check_failed("$warn volume: $vol at ". location($site) . $inuse, $msg_hash, $site->{id});
         }
     }
 }
@@ -373,6 +388,7 @@ sub check_for_broken_volume_names
     info("checking volume names and types ...");
     my $vldb = shift;
     my $vols = shift;
+    my $msg_hash = shift;
     my $db = sites_hash($vldb->{sites}, "vldb");
     foreach my $site (@{ $vols->{list} }) {
         my $key = site_key($site);
@@ -382,13 +398,13 @@ sub check_for_broken_volume_names
             if ($site->{name} && ($v->{name} ne $site->{name})) {
                 check_failed("name mismatch: $site->{name} ($site->{id}) ".
                      "should be $v->{name} ".
-                     "at ". location($site));
+                     "at ". location($site), $msg_hash, $site->{id});
             }
             if ($site->{type} && ($v->{type} ne $site->{type})) {
                 my $vol = site_string($site);
                 check_failed("type mismatch: $vol ".
                      "$site->{type} should be $v->{type} ".
-                     "at ". location($site));
+                     "at ". location($site), $msg_hash, $site->{id});
             }
         }
     }
@@ -399,6 +415,7 @@ sub check_for_stale_locks
 {
     my $vldb = shift;
     my $tx = shift;
+    my $msg_hash = shift;
 
     info("checking for stale locks ...");
     VOL: while (my ($id, $v)=each(%{ $vldb->{numbers} })) {
@@ -411,10 +428,10 @@ sub check_for_stale_locks
         }
         $v->{stalelock} = 1;
         if ($v->{op}) {
-            check_failed("possible stale lock: op $v->{op} $v->{name} ($v->{rw})");
+            check_failed("possible stale lock: op $v->{op} $v->{name} ($v->{rw})", $msg_hash, $id);
         }
         else {
-            check_failed("possible stale lock: $v->{name} ($v->{rw})");
+            check_failed("possible stale lock: $v->{name} ($v->{rw})", $msg_hash, $id);
         }
     }
 }
@@ -423,6 +440,7 @@ sub check_for_stale_locks
 sub check_for_failed_releases
 {
     my $vldb = shift;
+    my $msg_hash = shift;
 
     # check_for_stale_locks() must be run before this routine is called.
     info("checking for failed releases ...");
@@ -433,10 +451,10 @@ sub check_for_failed_releases
                 info("release in progress: $v->{name} $v->{rw}");
             }
             elsif ($v->{rflags} == REL_NOT) {
-                check_failed("not released: $v->{name} ($v->{rw})");
+                check_failed("not released: $v->{name} ($v->{rw})", $msg_hash, $id);
             }
             else {
-                check_failed("failed release: $v->{name} ($v->{rw})");
+                check_failed("failed release: $v->{name} ($v->{rw})", $msg_hash, $id);
             }
         }
     }
@@ -446,6 +464,7 @@ sub check_for_failed_releases
 sub check_for_missing_ro_clone_site
 {
     my $vldb = shift;
+    my $msg_hash = shift;
 
     info("checking for missing ro clone sites ...");
     while (my ($id, $v)=each(%{ $vldb->{numbers} })) {
@@ -464,7 +483,7 @@ sub check_for_missing_ro_clone_site
             } @ro;
             unless ($rc) {
                 check_failed("addsite needed: $v->{name} ($v->{rw}) at ".
-                    location($rw));
+                    location($rw), $msg_hash, $id);
             }
         }
     }
@@ -475,6 +494,7 @@ sub check_for_offline_volumes
 {
     my $vldb = shift;
     my $vols = shift;
+    my $msg_hash = shift;
 
     unless ($opt_level >= 2) {
         info("skipping offline volume checks.");
@@ -485,7 +505,7 @@ sub check_for_offline_volumes
     foreach my $site (@{ $vols->{list} }) {
         if ($site->{status} ne "OK") {
             my $vol = site_string($site);
-            check_failed("volume offline: $vol at ". location($site));
+            check_failed("volume offline: $vol at ". location($site), $msg_hash, $site->{id});
         }
     }
     foreach my $id (@{ $vols->{busy} }) {
@@ -493,10 +513,10 @@ sub check_for_offline_volumes
         if ($v && $v->{locked} && !$v->{stalelock}) {
             next;  # skip warning if a transaction is in progress
         }
-        check_failed("volume busy: $id");
+        check_failed("volume busy: $id", $msg_hash, $id);
     }
     foreach my $id (@{ $vols->{unattached} }) {
-        check_failed("volume attach error: $id");
+        check_failed("volume attach error: $id", $msg_hash, $id);
     }
 }
 
@@ -523,6 +543,50 @@ sub warning
 }
 
 #------------------------------------------------------------------
+# Print warning messages to stdout.
+#
+sub print_messages
+{
+    my $vldb = shift;
+    my $messages_t = shift;
+    my $old_servers_ref = $messages_t->{"check_for_old_servers"};
+    my $missing_volumes_ref = $messages_t->{"check_for_missing_volumes"};
+    my $stray_volumes_ref = $messages_t->{"check_for_stray_volumes"};
+    my $broken_volume_names_ref = $messages_t->{"check_for_broken_volume_names"};
+    my $missing_ro_clone_site = $messages_t->{"check_for_missing_ro_clone_site"};
+    my $stale_lock_ref = $messages_t->{"check_for_stale_locks"};
+    my $offline_volumes_ref = $messages_t->{"check_for_offline_volumes"};
+    my $failed_releases_ref = $messages_t->{"check_for_failed_releases"};
+
+    foreach ( keys % { $old_servers_ref } ) {
+        warning($old_servers_ref->{$_});
+    }
+    foreach ( keys % { $missing_volumes_ref } ) {
+        warning($missing_volumes_ref->{$_});
+    }
+    foreach ( keys % { $stray_volumes_ref } ) {
+        warning($stray_volumes_ref->{$_});
+    }
+    foreach ( keys % { $broken_volume_names_ref } ) {
+        warning($broken_volume_names_ref->{$_});
+    }
+    foreach ( keys % { $missing_ro_clone_site } ) {
+        warning($missing_ro_clone_site->{$_});
+    }
+    foreach ( keys % { $stale_lock_ref } ) {
+        if (!exists($failed_releases_ref->{$_})) {
+            warning($stale_lock_ref->{$_});
+        }
+    }
+    foreach ( keys % { $offline_volumes_ref } ) {
+        warning($offline_volumes_ref->{$_});
+    }
+    foreach ( keys % { $failed_releases_ref } ) {
+        warning($failed_releases_ref->{$_});
+    }
+}
+
+#------------------------------------------------------------------
 # Print a error message to stderr.
 #
 sub error
@@ -545,12 +609,19 @@ sub fatal
 }
 
 #------------------------------------------------------------------
-# A check failed, print a warning.
+# A check failed, store a warning.
 #
 sub check_failed
 {
     my $msg = shift;
-    warning($msg);
+    my $msg_hash = shift;
+    my $key = shift;
+
+    if (exists($msg_hash->{$key})) {
+        $msg_hash->{$key} = $msg_hash->{$key}."\n".$msg;
+    } else {
+        $msg_hash->{$key} = $msg;
+    }
 }
 
 #------------------------------------------------------------------
