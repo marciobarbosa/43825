@@ -251,7 +251,7 @@ sub main
     check_for_offline_volumes($vldb, $vols, $messages->{"check_for_offline_volumes"});
     check_for_failed_releases($vldb, $messages->{"check_for_failed_releases"});
 
-    print_messages($vldb, $messages);
+    print_messages($messages);
 
     return 0; # all checks ran
 }
@@ -547,7 +547,6 @@ sub warning
 #
 sub print_messages
 {
-    my $vldb = shift;
     my $messages_t = shift;
     my $old_servers_ref = $messages_t->{"check_for_old_servers"};
     my $missing_volumes_ref = $messages_t->{"check_for_missing_volumes"};
